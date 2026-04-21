@@ -8,7 +8,7 @@ Claude Code normally only works with Anthropic's own models, which cost money pe
 Claude Code  →  Arbiter (localhost)  →  NVIDIA NIM Cloud  →  Kimi K2.5 (1T params)
 ```
 
-**NVIDIA NIM models are free** to use with an API key from [build.nvidia.com](https://build.nvidia.com). No credit card, no per-token charges.
+**NVIDIA NIM models are free** to use with an API key from [build.nvidia.com](https://build.nvidia.com). No credit card, no per-token charges. Arbiter itself is fully open source.
 
 ---
 
@@ -49,21 +49,13 @@ Go to [build.nvidia.com](https://build.nvidia.com), sign up, and copy your API k
 pip install fastapi uvicorn litellm openai
 ```
 
-### Step 3 — Save your API key
-
-```cmd
-setx NVIDIA_API_KEY nvapi-your-key-here
-```
-
-Then open a **new terminal window** — the key won't be visible in your current one.
-
-### Step 4 — Launch
+### Step 3 — Launch
 
 ```cmd
 start_arbiter.bat
 ```
 
-That's it. Claude Code will open automatically, already pointed at Arbiter. You'll be asked to pick a model on first run — just hit Enter to go with Kimi K2.5 (the best option).
+That's it. On first run, the launcher will ask for your API key and which model you want to use. Claude Code will open automatically after that.
 
 ---
 
@@ -118,10 +110,10 @@ set BRIDGE_PORT=4005
 
 | Model | Status |
 |---|---|
-| Kimi K2.5 (`moonshotai/kimi-k2.5`) | ✅ Confirmed working |
+| Kimi K2.5 (`moonshotai/kimi-k2.5`) | ✅ Confirmed working — deprecation expected, watch NIM for updates |
 | Kimi K2 0905 (`moonshotai/kimi-k2-instruct-0905`) | ✅ Confirmed working |
-| Mistral Large 2 | ❌ Not available on free tier |
-| GLM 4.7 / 5.1 | ❌ Not available on free tier |
+| Mistral Large 3 (`mistralai/mistral-large-3-675b-instruct-2512`) | ✅ Confirmed working |
+| GLM 4.7 / 5.1 | ⚠️ Unstable — inconsistent availability |
 
 Not all models on [build.nvidia.com](https://build.nvidia.com) support the tool-calling that Claude Code requires. If a model doesn't work, the fallback chain will catch it. Check the site for the latest available models.
 
@@ -149,4 +141,4 @@ Not all models on [build.nvidia.com](https://build.nvidia.com) support the tool-
 
 ## License
 
-MIT
+MIT — open source, free to use, modify, and distribute.
