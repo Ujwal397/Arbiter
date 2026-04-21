@@ -1,0 +1,5 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+litellm>=1.40.0
+openai>=1.30.0
+requests>=2.31.0        # used by check_arbiter.py --test (functional bridge test)

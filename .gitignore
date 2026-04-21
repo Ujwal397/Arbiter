@@ -1,0 +1,28 @@
+# Secrets — NEVER commit
+.env
+*.env
+
+# Runtime logs — may contain request bodies and API traces
+*.log
+arbiter_crash.log
+
+# Failed request dumps — contain conversation data
+failed_request_body.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
