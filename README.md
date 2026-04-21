@@ -1,96 +1,81 @@
 # Arbiter
 
-A local proxy that lets **Claude Code** use NVIDIA NIM models instead of Anthropic's API, with zero changes to your Claude Code workflow.
+> **Run Claude Code with massive AI models — completely free, no local hardware required.**
+
+Claude Code normally only works with Anthropic's own models, which cost money per token. Arbiter breaks that lock. It sits between Claude Code and NVIDIA's free cloud API, letting you use models like **Kimi K2.5** — a 1 trillion parameter model that would be physically impossible to run on your own machine — at zero cost.
 
 ```
-Claude Code → localhost:4005 → arbiter_bridge.py → NVIDIA NIM (Kimi K2.5 / K2 0905)
+Claude Code  →  Arbiter (localhost)  →  NVIDIA NIM Cloud  →  Kimi K2.5 (1T params)
 ```
+
+**NVIDIA NIM models are free** to use with an API key from [build.nvidia.com](https://build.nvidia.com). No credit card, no per-token charges.
+
+---
+
+## Why Arbiter?
+
+| Without Arbiter | With Arbiter |
+|---|---|
+| Claude Code only works with Anthropic's paid API | Use NVIDIA's free cloud models instead |
+| You pay per token, costs add up fast | Completely free |
+| Limited to models Anthropic offers | Access 1T+ parameter models like Kimi K2.5 |
+| Would need enterprise hardware to run large models locally | Runs in the cloud, nothing to install beyond Python |
 
 ---
 
 ## Features
 
-| Feature | Detail |
-|---|---|
-| **Task-aware routing** | Classifies each request (coding / UI / reasoning / fast) and routes to the best model tier |
-| **Three-tier fallback** | On 429/503/DEGRADED: target → ELITE_FALLBACK → SPEED_MODEL |
-| **Kimi token cleanup** | Strips raw `<\|tool_call...\|>` leakage from Kimi K2.5 streaming responses |
-| **Per-model tool cap** | Prevents silent hangs on models that choke on Claude Code's 59-tool payload |
-| **CC crash fix** | Correct SSE field placement (input_tokens in message_start only) prevents the `$.input_tokens` undefined crash in CC 2.1.114+ |
+**Smart model routing** — Arbiter reads what you're asking Claude Code to do and automatically picks the right model for the job. Asking it to build a complex UI? It routes to the most powerful model. Just asking it to summarize something? It picks the fastest one. You never have to think about this.
+
+**Automatic fallback** — If a model is busy or unavailable, Arbiter silently steps down to the next best option and keeps working. You won't see errors or interruptions.
+
+**Works out of the box** — No changes to how you use Claude Code. Install, run the launcher, and everything routes through Arbiter automatically.
+
+**Supports any NIM model** — The model list is editable. If NVIDIA releases something new, you add two lines and it's available in the menu.
+
+**Crash prevention** — Fixes a known Claude Code bug that causes a silent crash when using non-Anthropic backends. You would never see an error message — your session would just silently stop working. Arbiter prevents this.
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites
+### Step 1 — Get a free NVIDIA API key
 
-```bash
+Go to [build.nvidia.com](https://build.nvidia.com), sign up, and copy your API key. It starts with `nvapi-`.
+
+### Step 2 — Install Python dependencies
+
+```cmd
 pip install fastapi uvicorn litellm openai
 ```
 
-### 2. Set your NVIDIA API key
+### Step 3 — Save your API key
 
-**Windows (permanent):**
 ```cmd
 setx NVIDIA_API_KEY nvapi-your-key-here
 ```
-Then open a **new** terminal — `setx` only takes effect in new sessions.
 
-**Or per-session:**
-```cmd
-set NVIDIA_API_KEY=nvapi-your-key-here
-```
+Then open a **new terminal window** — the key won't be visible in your current one.
 
-### 3. Launch
+### Step 4 — Launch
 
 ```cmd
-start_nvidia_brain.bat
+start_arbiter.bat
 ```
 
-This will:
-1. Verify dependencies
-2. Start the bridge on `127.0.0.1:4005`
-3. Set `ANTHROPIC_BASE_URL=http://127.0.0.1:4005` so Claude Code routes through it
-4. Launch Claude Code in your project folder
-
----
-
-## Configuration
-
-### Changing the target project folder
-
-Set `TARGET_DIR` before running:
-```cmd
-set TARGET_DIR=C:\path\to\your\project
-start_nvidia_brain.bat
-```
-
-### Overriding the Python executable
-
-```cmd
-set PYTHON_EXE=C:\path\to\python.exe
-start_nvidia_brain.bat
-```
-
-### Bridge host/port
-
-```cmd
-set BRIDGE_HOST=127.0.0.1
-set BRIDGE_PORT=4005
-```
+That's it. Claude Code will open automatically, already pointed at Arbiter. You'll be asked to pick a model on first run — just hit Enter to go with Kimi K2.5 (the best option).
 
 ---
 
 ## Model Selection
 
-On first launch you'll see a menu to pick your elite model:
+When you launch for the first time, you'll see this menu:
 
 ```
 [?] Select the elite model for this session:
-    (K2 0905 is always kept as speed/fallback — this replaces the elite slot only)
 
-    1. Kimi K2.5                (elite — best coding/agentic, confirmed)
-    2. Kimi K2 0905             (fast — good for most tasks, confirmed)
+    1. Kimi K2.5                (best — 1T params, top coding & reasoning)
+    2. Kimi K2 0905             (fast — great for most tasks)
     3. Qwen3-Coder 480B         (coding-focused, very large) (*)
     4. Llama 3.3 70B Instruct   (general purpose, fast) (*)
     5. DeepSeek R1 0528         (strong reasoning) (*)
@@ -99,71 +84,66 @@ On first launch you'll see a menu to pick your elite model:
     Choice [1-6, default=1]:
 ```
 
-Your choice replaces the **elite slot only** — K2 0905 stays fixed as the speed tier and fallback. If the elite model hits a 429 or 503, the bridge automatically steps down to K2 0905.
+Your pick becomes the primary model. **Kimi K2 0905 is always kept as a backup** — if your chosen model is unavailable, Arbiter automatically falls back to it with no interruption.
 
-Save your choice to skip the menu on future launches. To reset it:
+You can also paste a full URL from build.nvidia.com directly into the Custom field — Arbiter strips it down to the right format automatically.
+
+> **Note:** Models marked `(*)` are not confirmed available on all NVIDIA account tiers. If one returns a "not found" error, Arbiter falls back to K2 0905 silently.
+
+To reset your saved choice and see the menu again:
 ```cmd
 setx NVIDIA_ELITE_MODEL ""
 ```
 
-To add models to the list, edit the `MODEL ROSTER` block at the top of `start_nvidia_brain.bat`.
+---
 
-> `(*)` = not confirmed available on all NIM tiers. If a model returns 404, the fallback chain will catch it and step down to K2 0905.
+## Configuration
+
+Most things work without touching any config. These are available if you need them:
+
+```cmd
+:: Change which folder Claude Code opens in
+set TARGET_DIR=C:\path\to\your\project
+
+:: Change the Python executable if needed
+set PYTHON_EXE=C:\path\to\python.exe
+
+:: Change the local port (default: 4005)
+set BRIDGE_PORT=4005
+```
 
 ---
 
-### Tiers
-
-| Tier | Model | When |
-|---|---|---|
-| Elite | `kimi-k2.5` | coding, UI, reasoning, long-context, agentic default |
-| Speed | `kimi-k2-instruct-0905` | fast tasks (define/summarize/translate), 429 fallback |
-
-### Task classifier
-
-The bridge scans the last 2 user messages and pattern-matches to one of:
-
-`ui_complex` → `ui_quick` → `coding` → `reasoning` → `longcontext` → `fast`
-
-Heavy tasks (`coding`, `ui_*`, `reasoning`, `longcontext`) always upgrade to Kimi K2.5, even when Claude Code dispatches via the Haiku alias.
-
-### Adding a new model
-
-1. Add it to `MODEL_MAP` in `arbiter_bridge.py`
-2. Add its `max_tokens` to `MODEL_MAX_TOKENS`
-3. If it hangs with many tools, add it to `MAX_TOOLS_PER_MODEL`
-
----
-
-## Known NIM Model Status
+## Known Model Availability
 
 | Model | Status |
 |---|---|
-| `moonshotai/kimi-k2.5` | ✅ Available |
-| `moonshotai/kimi-k2-instruct-0905` | ✅ Available |
-| `mistral-large-2-instruct` | ❌ 404 (may require tier upgrade) |
-| `GLM 4.7 / GLM 5.1` | ❌ 404 (may require tier upgrade) |
+| Kimi K2.5 (`moonshotai/kimi-k2.5`) | ✅ Confirmed working |
+| Kimi K2 0905 (`moonshotai/kimi-k2-instruct-0905`) | ✅ Confirmed working |
+| Mistral Large 2 | ❌ Not available on free tier |
+| GLM 4.7 / 5.1 | ❌ Not available on free tier |
+
+Not all models on [build.nvidia.com](https://build.nvidia.com) support the tool-calling that Claude Code requires. If a model doesn't work, the fallback chain will catch it. Check the site for the latest available models.
 
 ---
 
 ## Files
 
-| File | Purpose |
+| File | What it does |
 |---|---|
-| `arbiter_bridge.py` | Main FastAPI proxy server |
-| `start_nvidia_brain.bat` | Windows launcher |
-| `check_arbiter.py` | Dependency audit + optional functional test (`--test`) |
-| `orjson.py` / `mock_orjson/` | stdlib-only orjson shim (no Rust dependency needed) |
-| `requirements.txt` | Python dependencies |
-| `.env.example` | Environment variable template |
+| `arbiter_bridge.py` | The proxy server — handles all routing and translation |
+| `start_arbiter.bat` | Windows launcher — run this to start everything |
+| `check_arbiter.py` | Checks your setup is correct (`--test` runs a live request) |
+| `requirements.txt` | Python packages needed |
+| `.env.example` | Template for storing your API key in a file instead of system env |
 
 ---
 
 ## Security
 
-- The bridge binds to `127.0.0.1` only — not reachable from other devices on your network
-- **Never commit your NVIDIA API key** — use environment variables or a `.env` file (already in `.gitignore`)
-- `bridge_runtime.log` and `failed_request_body.json` are gitignored — they can contain request data
+- Arbiter only listens on `127.0.0.1` — it's not accessible from other devices on your network
+- Your NVIDIA API key is never written to any file by default — it stays in your environment variables
+- Log files are excluded from git automatically
 
 ---
 
