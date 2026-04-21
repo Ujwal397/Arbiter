@@ -80,7 +80,7 @@ Your pick becomes the primary model. **Kimi K2 0905 is always kept as a backup**
 
 You can also paste a full URL from build.nvidia.com directly into the Custom field — Arbiter strips it down to the right format automatically.
 
-> **Note:** Models marked `(*)` are not confirmed available on all NVIDIA account tiers. If one returns a "not found" error, Arbiter falls back to K2 0905 silently.
+> **Note:** Models marked `(*)` are either deprecated, unstable or might not work. Always check availability by manually checking the model on build.nvidia.com. If one returns a "not found" error, Arbiter falls back to K2 0905 silently.
 
 To reset your saved choice and see the menu again:
 ```cmd
@@ -110,7 +110,7 @@ set BRIDGE_PORT=4005
 
 | Model | Status |
 |---|---|
-| Kimi K2.5 (`moonshotai/kimi-k2.5`) | ✅ Confirmed working — deprecation expected, watch NIM for updates |
+| Kimi K2.5 (`moonshotai/kimi-k2.5`) | ✅ Confirmed working — deprecation soon, watch NIM for updates |
 | Kimi K2 0905 (`moonshotai/kimi-k2-instruct-0905`) | ✅ Confirmed working |
 | Mistral Large 3 (`mistralai/mistral-large-3-675b-instruct-2512`) | ✅ Confirmed working |
 | GLM 4.7 / 5.1 | ⚠️ Unstable — inconsistent availability |
