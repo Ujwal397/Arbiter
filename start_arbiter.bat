@@ -1,6 +1,5 @@
 @echo off
 SETLOCAL EnableDelayedExpansion
-set "BANG=!"
 
 :: ===========================================================================
 :: MODEL ROSTER -- Edit this block to add / remove / update models.
@@ -54,7 +53,7 @@ if "%PYTHON_EXE%"=="" (
 )
 if "%PYTHON_EXE%"=="" (
     echo.
-    echo [!BANG!] ERROR: No working Python found.
+    echo [^!] ERROR: No working Python found.
     echo     Tried: py, python, python3 - all failed.
     echo.
     echo     Fix options:
@@ -78,7 +77,7 @@ echo [*] Checking dependencies...
 "%PYTHON_EXE%" "%~dp0check_arbiter.py" --install
 if %errorlevel% neq 0 (
     echo.
-    echo [!BANG!] Dependency install failed. See output above.
+    echo [^!] Dependency install failed. See output above.
     pause
     exit /b 1
 )
@@ -95,7 +94,7 @@ if not "%NVIDIA_API_KEY%"=="" goto :key_done
     set /p NVIDIA_API_KEY="    Paste key (nvapi-...): "
     echo.
     if "!NVIDIA_API_KEY!"=="" (
-        echo [!BANG!] No key entered. Exiting.
+        echo [^!] No key entered. Exiting.
         pause
         exit /b 1
     )
@@ -138,8 +137,8 @@ echo [*] Project    : %TARGET_DIR%
 
 if not exist "%TARGET_DIR%" (
     echo.
-    echo [!BANG!] Folder not found: %TARGET_DIR%
-    echo [!BANG!] Check the path or reset it with:  setx TARGET_DIR ""
+    echo [^!] Folder not found: %TARGET_DIR%
+    echo [^!] Check the path or reset it with:  setx TARGET_DIR ""
     pause
     exit /b 1
 )
@@ -157,11 +156,11 @@ if not "%NVIDIA_ELITE_MODEL%"=="" goto :model_done
 echo [?] Select the elite model for this session:
 echo     (K2 0905 is always kept as speed/fallback - this replaces the elite slot only)
 echo.
-echo [!BANG!] NOTE: Not all NIM models work with Claude Code.
-echo [!BANG!] A model can fail for two reasons:
-echo [!BANG!]   1. Not available on your NIM tier/deprecated (returns 404 - Arbiter will fall back to K2 0905)
-echo [!BANG!]   2. Does not support function/tool calling (causes silent failures or broken output)
-echo [!BANG!] Models may go deprecated anytime so please watch https://build.nvidia.com to check for latest models.
+echo [^!] NOTE: Not all NIM models work with Claude Code.
+echo [^!] A model can fail for two reasons:
+echo [^!]   1. Not available on your NIM tier/deprecated (returns 404 - Arbiter will fall back to K2 0905)
+echo [^!]   2. Does not support function/tool calling (causes silent failures or broken output)
+echo [^!] Models may go deprecated anytime so please watch https://build.nvidia.com to check for latest models.
 echo     (*) = not confirmed available on all NIM tiers
 echo.
 echo     1. %MODEL_NAME_1%
@@ -192,7 +191,7 @@ if "!NVIDIA_ELITE_MODEL!"=="CUSTOM" (
     echo.
     set /p NVIDIA_ELITE_MODEL="    Model: "
     if "!NVIDIA_ELITE_MODEL!"=="" (
-        echo [!BANG!] No model entered. Using default Kimi K2.5.
+        echo [^!] No model entered. Using default Kimi K2.5.
         set "NVIDIA_ELITE_MODEL=!MODEL_ID_1!"
     )
     :: Strip build.nvidia.com URL prefix if user pasted the browser URL.
@@ -231,11 +230,77 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr :4005') do (
     taskkill /f /pid %%a >nul 2>&1
 )
 
-set PYTHONPATH=%PYTHONPATH%;%~dp0
+if "%PYTHONPATH%"=="" (
+    set "PYTHONPATH=%~dp0"
+) else (
+    set "PYTHONPATH=%PYTHONPATH%;%~dp0"
+)
 echo [*] Starting Arbiter on 127.0.0.1:4005...
-start "ARBITER BRIDGE" /min "%PYTHON_EXE%" "%~dp0arbiter_bridge.py"
-echo [*] Waiting for bridge to start...
-timeout /t 5 /nobreak >nul
+start "ARBITER BRIDGE" "%PYTHON_EXE%" "%~dp0arbiter_bridge.py"
+"%PYTHON_EXE%" "%~dp0check_arbiter.py" --wait
+if %errorlevel% neq 0 (
+    echo.
+    echo [^!] Bridge failed to start. See the log excerpt above.
+    echo [^!] Full log: %~dp0arbiter_runtime.log
+    pause
+    exit /b 1
+)
+
+:: -- Check Claude Code is installed ----------------------------------------
+where claude >nul 2>&1
+if %errorlevel% neq 0 (
+    echo.
+    echo [^!] Claude Code is not installed on this machine.
+    echo [^!] Arbiter needs Claude Code to work.
+    echo.
+    echo     Claude Code is installed via npm ^(Node.js package manager^).
+    echo.
+    where npm >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [+] npm is available. Offering automatic install...
+        echo.
+        choice /C YN /M "    Install Claude Code now? ^(npm install -g @anthropic-ai/claude-code^)"
+        if !errorlevel! equ 1 (
+            echo.
+            echo [*] Installing Claude Code - this may take a minute...
+            npm install -g @anthropic-ai/claude-code
+            if !errorlevel! equ 0 (
+                echo.
+                echo [+] Claude Code installed successfully.
+                echo [+] Launching now...
+                echo.
+            ) else (
+                echo.
+                echo [^!] npm install failed. Try running this script as Administrator,
+                echo [^!] or install manually and re-run Arbiter.
+                pause
+                exit /b 1
+            )
+        ) else (
+            echo.
+            echo     To install manually:
+            echo       npm install -g @anthropic-ai/claude-code
+            echo     Then re-run start_arbiter.bat.
+            pause
+            exit /b 1
+        )
+    ) else (
+        echo [^!] npm is not installed either. You need Node.js first.
+        echo.
+        echo     Step 1: Download and install Node.js from https://nodejs.org
+        echo             Choose the LTS version. Tick "Add to PATH" during install.
+        echo.
+        echo     Step 2: Open a NEW terminal window ^(important - PATH wont update
+        echo             until you open a fresh one^).
+        echo.
+        echo     Step 3: Run:  npm install -g @anthropic-ai/claude-code
+        echo.
+        echo     Step 4: Re-run start_arbiter.bat
+        echo.
+        pause
+        exit /b 1
+    )
+)
 
 echo.
 echo ======================================================
