@@ -1,12 +1,29 @@
 import os
 import re
 import json
+import asyncio
 import logging
+import logging.handlers
+import queue
 import time
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 import uvicorn
-from litellm import completion
+from litellm import acompletion
+
+
+# orjson for fast JSON serialization — falls back gracefully if not installed
+try:
+    import orjson as _orjson
+    def _json_dumps(obj) -> bytes:
+        try:
+            return _orjson.dumps(obj)
+        except (TypeError, ValueError):
+            return _orjson.dumps(obj, default=str)
+    _ORJSON_AVAILABLE = True
+except ImportError:
+    _ORJSON_AVAILABLE = False
 
 # ── Kimi K2.5 token garbage filter ───────────────────────────────────────────
 # Kimi sometimes leaks internal chain-of-thought as Python-repr content blocks.
@@ -20,8 +37,6 @@ _GARBAGE_PREFIXES = (
 )
 
 # Hard cap on Kimi buffer size to prevent unbounded memory growth.
-# If a response exceeds this without emitting a clean flush, the buffer is
-# force-flushed as plain text (minus any garbage prefix).
 _KIMI_BUFFER_MAX_CHARS = 8192
 
 def _is_garbage_text(text: str) -> bool:
@@ -29,31 +44,69 @@ def _is_garbage_text(text: str) -> bool:
     return any(t.startswith(p) for p in _GARBAGE_PREFIXES)
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("arbiter_runtime.log", encoding="utf-8")
-    ]
-)
-logger = logging.getLogger("arbiter")
+# ── Async logging setup ───────────────────────────────────────────────────────
+# File I/O runs in a background thread via QueueHandler so it never blocks
+# the async event loop. Console output stays synchronous (cheap).
+#
+# IMPORTANT: Do NOT set a Formatter on the QueueHandler itself.
+# QueueHandler.prepare() calls self.format(record) if a formatter is set,
+# storing the pre-formatted string in record.msg. When QueueListener then
+# passes the LogRecord to FileHandler, FileHandler formats record.msg again —
+# producing a double-stamped line. Keep QueueHandler formatter-free.
+_log_queue = queue.Queue(-1)
+_queue_handler = logging.handlers.QueueHandler(_log_queue)  # NO formatter here
 
-app = FastAPI(title="Arbiter Bridge")
+_log_fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+
+_file_handler = logging.FileHandler("arbiter_runtime.log", encoding="utf-8")
+_file_handler.setFormatter(_log_fmt)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_fmt)
+
+_log_listener = logging.handlers.QueueListener(_log_queue, _file_handler, respect_handler_level=True)
+_log_listener.start()
+
+# basicConfig with explicit handlers — no format= to avoid stamping QueueHandler
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _queue_handler])
+logger = logging.getLogger("arbiter")
+# Prevent double-formatted log lines (uvicorn adds its own root handlers)
+logger.propagate = False
+
+
+# ── Lifespan: startup / graceful shutdown ─────────────────────────────────────
+# @app.on_event("shutdown") was deprecated in FastAPI 0.93. Use lifespan instead.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield  # Server runs here
+    _log_listener.stop()
+
+app = FastAPI(title="Arbiter Bridge", lifespan=lifespan)
+
+
+# ── Request logging middleware ────────────────────────────────────────────────
+# Logs EVERY inbound request (method, path, status) so we can diagnose what
+# Claude Code hits before crashing — including unhandled 404 routes.
+@app.middleware("http")
+async def log_all_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    elapsed = round(time.time() - start, 3)
+    logger.info(
+        f"[REQ] {request.method} {request.url.path} "
+        f"→ {response.status_code} ({elapsed}s)"
+    )
+    return response
 
 # ── Model roster ──────────────────────────────────────────────────────────────
-# Two-tier setup:
-#   Elite        : Kimi K2.5 by default, overridable via NVIDIA_ELITE_MODEL env var
-#   Speed/Fallback: Kimi K2 0905 — always fixed; never overridden by model selection
-#
-# NVIDIA_ELITE_MODEL is set by start_nvidia_brain.bat's model selection menu.
-# It replaces the elite slot only — the speed/fallback chain is untouched.
-# Strip "openai/" prefix if the user pasted a full LiteLLM string by mistake.
 _env_elite = os.environ.get("NVIDIA_ELITE_MODEL", "").strip().removeprefix("openai/")
-_elite_base = _env_elite if _env_elite else "moonshotai/kimi-k2.5"
+# Default is now Kimi K2 0905 — confirmed stable on all NIM tiers.
+# K2.5 remains available via NVIDIA_ELITE_MODEL env override or the startup menu.
+_elite_base = _env_elite if _env_elite else "moonshotai/kimi-k2-instruct-0905"
 
 ELITE_MODEL    = f"openai/{_elite_base}"
-ELITE_FALLBACK = "openai/moonshotai/kimi-k2-instruct-0905"
+# Fallback is Mistral Large 3 — broad availability, strong general-purpose performance.
+ELITE_FALLBACK = "openai/mistralai/mistral-large-3-675b-instruct-2512"
 SPEED_MODEL    = "openai/moonshotai/kimi-k2-instruct-0905"
 UI_MODEL       = ELITE_MODEL  # GLM unavailable on NIM — elite model handles UI too
 
@@ -61,12 +114,8 @@ if _env_elite:
     logger.info(f"[*] Elite model overridden by env: {ELITE_MODEL}")
 
 # ── Per-model tool cap ────────────────────────────────────────────────────────
-# Some NIM models silently hang with Claude Code's full 59-tool payload.
-# Kimi K2.5 is confirmed stable at 59 tools.
-# Add entries here for any model that hangs: { "model-name-fragment": max_tools }
 MAX_TOOLS_PER_MODEL: dict[str, int] = {}
 
-# Request timeout — prevents silent hangs from consuming the fallback window.
 REQUEST_TIMEOUT = 90
 
 # ── Task-aware routing ────────────────────────────────────────────────────────
@@ -76,31 +125,29 @@ TASK_MODELS = {
     "longcontext": ELITE_MODEL,
     "ui_complex":  UI_MODEL,
     "ui_quick":    UI_MODEL,
-    "vision":      ELITE_MODEL,
-    "agentic":     ELITE_MODEL,
-    "fast":        SPEED_MODEL,   # summarize/define/translate → speed tier
-    "fallback":    ELITE_MODEL,
+    "fast":        SPEED_MODEL,
 }
 
+# Tasks that always upgrade to the elite tier even when CC dispatches via Haiku.
+# Defined at module level — creating this set inside handle_request on every
+# request was unnecessary GC pressure.
+HEAVY_TASKS = {"coding", "ui_complex", "ui_quick", "reasoning", "longcontext"}
+
 # Models where enable_thinking=True is wrong, slow, or unsupported.
-# Kimi uses reasoning_content field, not a template kwarg.
-# Add fragment strings here for any model that errors on enable_thinking.
 _THINKING_OFF_FRAGMENTS = (
-    "kimi-k2",     # K2.5 and K2 0905 — reasoning via reasoning_content field
-    "mistral",     # Mistral Large 2 — no thinking support on NIM
-    "llama",       # Llama models — no thinking template support
-    "qwen3",       # Qwen3 Coder — uses its own reasoning, not enable_thinking
-    "deepseek",    # DeepSeek R1 — reasoning built-in, enable_thinking unsupported
+    "kimi-k2",
+    "mistral",
+    "llama",
+    "qwen3",
+    "deepseek",
 )
 
 def _should_think(model: str) -> bool:
-    """Return True only for models that support enable_thinking=True."""
     m = model.lower()
     return not any(frag in m for frag in _THINKING_OFF_FRAGMENTS)
 
 
 # ── Task classification ───────────────────────────────────────────────────────
-# Compiled patterns, ordered by priority in _TASK_PRIORITY below.
 TASK_PATTERNS = {
     "coding": re.compile(
         r'\b(code|debug|implement|function|bug|error|script|class|refactor|syntax|compile|'
@@ -147,16 +194,9 @@ TASK_PATTERNS = {
     ),
 }
 
-# Priority order — first match wins.
-# ui_complex before ui_quick so architecture requests aren't cheapened.
-# ui_quick before coding so "Create a React component" routes to UI model.
 _TASK_PRIORITY = ["ui_complex", "ui_quick", "coding", "reasoning", "longcontext", "fast"]
 
 def classify_task(messages: list) -> str | None:
-    """
-    Scan the last 2 user messages and return a task key, or None.
-    Priority: ui_complex > ui_quick > coding > reasoning > longcontext > fast.
-    """
     user_texts = []
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -179,15 +219,12 @@ def classify_task(messages: list) -> str | None:
 
 
 MODEL_MAX_TOKENS = {
-    "openai/moonshotai/kimi-k2.5":             32768,
-    "openai/moonshotai/kimi-k2-instruct-0905": 32768,
-    # Custom/unknown models fall back to 32768 (safe default)
+    "openai/moonshotai/kimi-k2.5":                              32768,
+    "openai/moonshotai/kimi-k2-instruct-0905":                  32768,
+    "openai/mistralai/mistral-large-3-675b-instruct-2512":      32768,
 }
-# Ensure the selected elite model always has a max_tokens entry
 MODEL_MAX_TOKENS.setdefault(ELITE_MODEL, 32768)
 
-# Maps Claude model aliases (what CC sends) → NVIDIA NIM model strings.
-# Add new aliases here as needed.
 MODEL_MAP = {
     "claude-haiku-4-5-20251001":  SPEED_MODEL,
     "claude-3-5-sonnet-20241022": ELITE_MODEL,
@@ -195,12 +232,9 @@ MODEL_MAP = {
     "claude-sonnet-4-6":          ELITE_MODEL,
 }
 
-# Models that are never overridden by task routing (pinned to exact target).
-_PINNED_MODELS: set[str] = set()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def clean_tools(tools):
-    """Normalise Anthropic-format tool definitions to OpenAI function format."""
     if not tools:
         return None
     cleaned = []
@@ -225,10 +259,6 @@ def clean_tools(tools):
 
 
 def normalize_messages(messages):
-    """
-    Convert Anthropic message format to OpenAI format.
-    Handles: system, assistant (text + tool_use), user (text + tool_result).
-    """
     normalized = []
     for msg in messages:
         role    = msg.get("role")
@@ -282,8 +312,23 @@ def normalize_messages(messages):
                     if text_parts:
                         normalized.append({"role": "user", "content": text_parts})
                 else:
-                    text_parts = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-                    normalized.append({"role": "user", "content": text_parts})
+                    text_parts = []
+                    dropped_types = []
+                    for c in content:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "text":
+                            text_parts.append(c.get("text", ""))
+                        elif c.get("type") == "image":
+                            dropped_types.append("image")
+                        else:
+                            text_parts.append(c.get("text", ""))
+                    if dropped_types:
+                        logger.warning(
+                            f"[!] Dropped {len(dropped_types)} multimodal block(s) "
+                            f"({', '.join(dropped_types)}) — NIM models don't support images"
+                        )
+                    normalized.append({"role": "user", "content": "".join(text_parts)})
             else:
                 normalized.append(msg)
 
@@ -294,10 +339,6 @@ def normalize_messages(messages):
 
 
 def trim_tools(tools: list | None, model: str) -> list | None:
-    """
-    Cap tool list to MAX_TOOLS_PER_MODEL[model] if a limit is configured.
-    Tools are sorted by name for a deterministic, reproducible subset.
-    """
     if not tools:
         return tools
     model_key = model.removeprefix("openai/")
@@ -319,7 +360,8 @@ def trim_tools(tools: list | None, model: str) -> list | None:
 
 
 def safe_json(obj) -> str:
-    """json.dumps with a fallback for non-serialisable values."""
+    if _ORJSON_AVAILABLE:
+        return _json_dumps(obj).decode('utf-8')
     try:
         return json.dumps(obj)
     except (TypeError, ValueError):
@@ -328,32 +370,43 @@ def safe_json(obj) -> str:
 
 def _estimate_input_tokens(messages: list, tools: list) -> int:
     """
-    Fast token estimator: ~4 chars per token.
-    Pre-fills message_start so CC never sees a placeholder '1' for input_tokens,
-    avoiding the 'undefined is not an object (evaluating $.input_tokens)' crash.
+    Fast token estimator. Pre-fills message_start so CC never sees a
+    placeholder '1' for input_tokens, avoiding the
+    'undefined is not an object (evaluating $.input_tokens)' crash.
     """
-    total_chars = 0
+    text_chars = 0
+    code_chars = 0
+
+    def _classify(s: str):
+        nonlocal text_chars, code_chars
+        if "```" in s or s.count(";") > 5 or s.count("{") > 2:
+            code_chars += len(s)
+        else:
+            text_chars += len(s)
+
     for m in (messages or []):
         content = m.get("content", "")
         if isinstance(content, str):
-            total_chars += len(content)
+            _classify(content)
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
-                    total_chars += len(block.get("text", "") or block.get("content", ""))
-    if tools:
-        total_chars += len(tools) * 800  # ~200 tokens per tool schema
-    return max(1, total_chars // 4)
+                    _classify(block.get("text", "") or block.get("content", ""))
+
+    tool_tokens = len(tools) * 200 if tools else 0
+    return max(1, text_chars // 4 + code_chars // 3 + tool_tokens)
 
 
-def _call(model, messages, tools, body):
+# ── Async LiteLLM dispatch ────────────────────────────────────────────────────
+async def _call(model, messages, tools, body):
+    """Async streaming completion call to NVIDIA NIM via LiteLLM."""
     extra_body = {}
     if _should_think(model):
         extra_body = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
 
     capped_tools = trim_tools(tools, model)
 
-    return completion(
+    return await acompletion(
         model=model,
         messages=messages,
         tools=capped_tools,
@@ -370,12 +423,10 @@ def _call(model, messages, tools, body):
     )
 
 
-def call_with_fallback(nvidia_model, messages, tools, body):
+async def call_with_fallback(nvidia_model, messages, tools, body):
     """
     Three-tier cascade: target → ELITE_FALLBACK → SPEED_MODEL.
-    Retriable errors (429/DEGRADED/502/503) step to the next tier with a
-    short back-off. Non-retriable errors fail fast.
-    Each tier is tried at most once.
+    Uses asyncio.sleep so fallback back-off never blocks the event loop.
     """
     def _is_retriable(err: str) -> bool:
         return any(code in err for code in ("429", "DEGRADED", "503", "502"))
@@ -388,8 +439,8 @@ def call_with_fallback(nvidia_model, messages, tools, body):
             if idx > 0:
                 sleep_s = 2 * idx
                 logger.warning(f"[!] Falling back to {model} (sleeping {sleep_s}s)...")
-                time.sleep(sleep_s)
-            return _call(model, messages, tools, body)
+                await asyncio.sleep(sleep_s)   # non-blocking — was time.sleep()
+            return await _call(model, messages, tools, body)
         except Exception as e:
             last_exc = e
             if not _is_retriable(str(e)):
@@ -404,16 +455,16 @@ def call_with_fallback(nvidia_model, messages, tools, body):
 @app.head("/")
 async def health():
     return {
-        "status":        "online",
-        "engine":        "Arbiter",
-        "elite_model":   ELITE_MODEL,
-        "speed_model":   SPEED_MODEL,
+        "status":         "online",
+        "engine":         "Arbiter",
+        "elite_model":    ELITE_MODEL,
+        "fallback_model": ELITE_FALLBACK,
+        "speed_model":    SPEED_MODEL,
     }
 
 
 @app.get("/v1/models")
 async def list_models():
-    """CC may probe this endpoint; return the supported model roster."""
     models = [
         {
             "id": alias, "object": "model", "created": 1700000000,
@@ -426,11 +477,9 @@ async def list_models():
 
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(request: Request):
-    """CC 2.1.114+ calls this for context budget management before agentic loops.
-
-    CC accesses the result as both response.input_tokens AND response.usage.input_tokens
-    depending on version. We return both shapes to avoid the
-    'undefined is not an object (evaluating $.input_tokens)' crash.
+    """
+    CC 2.1.114+ calls this for context budget management before agentic loops.
+    Returns both top-level and nested usage shapes — CC versions differ on which they read.
     """
     try:
         body       = await request.json()
@@ -446,7 +495,6 @@ async def count_tokens(request: Request):
         total_chars = sum(len(str(m.get("content", ""))) for m in messages)
         tool_chars  = sum(len(str(t)) for t in (body.get("tools") or []))
         estimated   = max(1, (total_chars + tool_chars) // 4)
-        # Return both top-level and nested under "usage" — CC versions differ on which they read.
         return {"input_tokens": estimated, "usage": {"input_tokens": estimated}}
     except Exception as e:
         logger.error(f"[!] count_tokens error: {e}")
@@ -456,6 +504,7 @@ async def count_tokens(request: Request):
 @app.post("/v1/messages")
 @app.post("/v1/chat/completions")
 async def handle_request(request: Request):
+    start_time = time.time()
     body = None
     try:
         body         = await request.json()
@@ -477,20 +526,19 @@ async def handle_request(request: Request):
         tools    = clean_tools(body.get("tools"))
 
         # ── Task-aware routing ─────────────────────────────────────────────────
-        # Classifies the last 2 user messages and upgrades to ELITE_MODEL for
-        # heavy tasks (coding, UI, reasoning, long-context), even when CC
-        # dispatches via the Haiku (speed-tier) alias.
-        task = None
-        if model_name not in _PINNED_MODELS:
-            task = classify_task(messages)
-            HEAVY_TASKS = {"coding", "ui_complex", "ui_quick", "reasoning", "longcontext"}
-            if task and task in HEAVY_TASKS:
+        task = classify_task(messages)
+        if task:
+            if task in HEAVY_TASKS:
                 nvidia_model = TASK_MODELS.get(task, ELITE_MODEL)
                 logger.info(f"[*] Task router: '{task}' → {nvidia_model} (upgraded from {model_name})")
-            elif nvidia_model == ELITE_MODEL:
-                logger.info("[*] Task router: no specific task → Kimi K2.5 (agentic default)")
+            elif task == "fast":
+                # "fast" is a detected task — log it correctly, don't say "no task detected"
+                logger.info(f"[*] Task router: 'fast' → speed tier {nvidia_model}")
+        else:
+            if nvidia_model == ELITE_MODEL:
+                logger.info("[*] Task router: no task detected → elite default")
             else:
-                logger.info(f"[*] Task router: no task detected, speed tier → {nvidia_model}")
+                logger.info(f"[*] Task router: no task detected → speed tier {nvidia_model}")
 
         for field in ["thinking", "metadata", "context_management", "edits"]:
             body.pop(field, None)
@@ -499,17 +547,13 @@ async def handle_request(request: Request):
             f"[*] Dispatching {model_name} -> {nvidia_model} "
             f"(task={task or 'agentic'}, tools: {len(tools) if tools else 0})"
         )
-        response = call_with_fallback(nvidia_model, messages, tools, body)
+        response = await call_with_fallback(nvidia_model, messages, tools, body)
 
         # is_kimi_raw: True ONLY for Kimi K2.5 which leaks raw <|tool_call_argument_begin|> tokens.
         # K2 Instruct (0905) uses standard OpenAI function calling — no buffering needed.
-        # Applying the K2.5 buffer to K2 Instruct causes two bugs:
-        #   1. Any response containing "functions." (e.g. Python code) holds the entire
-        #      response until the 8192-char cap, turning streaming into a single burst.
-        #   2. Unnecessary overhead on every text chunk.
         is_kimi_raw = "k2.5" in nvidia_model.lower()
 
-        def stream_generator():
+        async def stream_generator():
             msg_id = f"msg_{int(time.time())}"
 
             estimated_input_tokens = _estimate_input_tokens(messages, tools)
@@ -533,11 +577,12 @@ async def handle_request(request: Request):
             active_tool_indices = set()
             real_input_tokens   = 1
             real_output_tokens  = 1
-            kimi_content_buffer = ""
+            kimi_buffer_parts: list[str] = []
+            kimi_buffer_len: int = 0
             KIMI_TOKEN          = "<|tool_call_argument_begin|>"
 
             try:
-                for chunk in response:
+                async for chunk in response:   # non-blocking async iteration
                     try:
                         data = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk.dict()
                     except Exception:
@@ -580,17 +625,20 @@ async def handle_request(request: Request):
 
                     # ── Regular text content ───────────────────────────────────
                     content_text = delta.get("content")
+                    # LiteLLM sometimes yields the string "None" for empty delta content — skip it
                     if content_text and content_text != "None":
                         if is_kimi_raw:
-                            kimi_content_buffer += content_text
-                            # Force-flush if buffer exceeds hard cap
-                            buffer_full = len(kimi_content_buffer) >= _KIMI_BUFFER_MAX_CHARS
-                            has_token   = KIMI_TOKEN in kimi_content_buffer or "functions." in kimi_content_buffer
+                            kimi_buffer_parts.append(content_text)
+                            kimi_buffer_len += len(content_text)
+                            buffer_full = kimi_buffer_len >= _KIMI_BUFFER_MAX_CHARS
+                            combined    = "".join(kimi_buffer_parts)
+                            has_token   = KIMI_TOKEN in combined or "functions." in combined
                             if not has_token or buffer_full:
                                 if buffer_full:
                                     logger.warning("[!] Kimi buffer cap hit — force-flushing as plain text")
-                                flush_text = kimi_content_buffer
-                                kimi_content_buffer = ""
+                                flush_text = combined
+                                kimi_buffer_parts = []
+                                kimi_buffer_len   = 0
                                 if flush_text and not _is_garbage_text(flush_text):
                                     if in_thinking:
                                         yield "event: content_block_delta\ndata: " + safe_json({
@@ -667,7 +715,10 @@ async def handle_request(request: Request):
                 logger.error(f"[!] Stream processing error: {stream_err}")
 
             # ── Parse any buffered Kimi raw tool-call tokens ───────────────────
-            if is_kimi_raw and kimi_content_buffer:
+            if is_kimi_raw and kimi_buffer_parts:
+                kimi_content_buffer = "".join(kimi_buffer_parts)
+                kimi_buffer_parts = []
+                kimi_buffer_len   = 0
                 kimi_tool_re = re.compile(
                     r'functions\.(\w+):(\d+)\s*<\|tool_call_argument_begin\|>(.*?)<\|tool_call_end\|>',
                     re.DOTALL
@@ -752,15 +803,12 @@ async def handle_request(request: Request):
 
             stop_reason = "tool_use" if active_tool_indices else "end_turn"
 
-            # ── message_delta ──────────────────────────────────────────────────
-            # Send all 4 fields matching message_start's usage shape.
-            # Some CC versions read input_tokens from message_delta too —
-            # sending 0 here is safe since the real value is already in message_start.
+            final_input_tokens = real_input_tokens if real_input_tokens > 1 else estimated_input_tokens
             yield "event: message_delta\ndata: " + safe_json({
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": None},
                 "usage": {
-                    "input_tokens":                0,
+                    "input_tokens":                final_input_tokens,
                     "output_tokens":               real_output_tokens,
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens":     0,
@@ -776,15 +824,14 @@ async def handle_request(request: Request):
                 "Cache-Control":     "no-cache",
                 "X-Accel-Buffering": "no",
                 "Connection":        "keep-alive",
+                "Content-Encoding":  "identity",
+                "X-Response-Time":   str(round(time.time() - start_time, 4)),
             },
         )
 
     except Exception as e:
         logger.error(f"[!] Bridge Error: {e}")
         if body:
-            # Strip conversation content before dumping — messages/system can
-            # contain sensitive user data. Keep only the structural fields
-            # needed to reproduce the routing/format issue.
             safe_dump = {
                 k: v for k, v in body.items()
                 if k not in ("messages", "system")
@@ -800,9 +847,6 @@ async def handle_request(request: Request):
 
 
 if __name__ == "__main__":
-    # FIX: bind to 127.0.0.1, not 0.0.0.0.
-    # 0.0.0.0 exposes the bridge (which has no auth) to every device on the
-    # local network. Local-only binding is correct for Claude Code use.
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "4005"))
     try:

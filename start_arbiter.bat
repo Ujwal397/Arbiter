@@ -5,22 +5,25 @@ SETLOCAL EnableDelayedExpansion
 :: MODEL ROSTER -- Edit this block to add / remove / update models.
 :: To add a model: increment MODEL_COUNT, add a NAME and ID pair.
 :: MODEL_ID must be the exact NIM model string (without "openai/" prefix).
-:: The last entry should always be the Custom option (ID=CUSTOM).
-:: Confirmed available models listed first; unconfirmed marked with (*).
+:: The last entry must always be the Custom option (ID=CUSTOM).
+::
+:: To open this file for editing from the startup menu, choose option E.
 :: ===========================================================================
-set "MODEL_COUNT=6"
-set "MODEL_NAME_1=Kimi K2.5                (elite - best coding/agentic, confirmed)"
-set "MODEL_ID_1=moonshotai/kimi-k2.5"
-set "MODEL_NAME_2=Kimi K2 0905             (fast - good for most tasks, confirmed)"
-set "MODEL_ID_2=moonshotai/kimi-k2-instruct-0905"
-set "MODEL_NAME_3=Qwen3-Coder 480B         (coding-focused, very large) (*)"
-set "MODEL_ID_3=qwen/qwen3-coder-480b-a22b"
-set "MODEL_NAME_4=Llama 3.3 70B Instruct   (general purpose, fast) (*)"
-set "MODEL_ID_4=meta/llama-3.3-70b-instruct"
-set "MODEL_NAME_5=DeepSeek R1 0528         (strong reasoning) (*)"
-set "MODEL_ID_5=deepseek/deepseek-r1-0528"
-set "MODEL_NAME_6=Custom                   (enter any NIM model string manually)"
-set "MODEL_ID_6=CUSTOM"
+set "MODEL_COUNT=7"
+set "MODEL_NAME_1=Kimi K2 0905              (DEFAULT - fast + capable)"
+set "MODEL_ID_1=moonshotai/kimi-k2-instruct-0905"
+set "MODEL_NAME_2=Kimi K2.5                 (elite - best coding/agentic)"
+set "MODEL_ID_2=moonshotai/kimi-k2.5"
+set "MODEL_NAME_3=Mistral Large 3           (fallback default - strong general purpose)"
+set "MODEL_ID_3=mistralai/mistral-large-3-675b-instruct-2512"
+set "MODEL_NAME_4=Qwen3-Coder 480B          (coding-focused, very large)"
+set "MODEL_ID_4=qwen/qwen3-coder-480b-a22b"
+set "MODEL_NAME_5=Llama 3.3 70B Instruct    (general purpose, fast)"
+set "MODEL_ID_5=meta/llama-3.3-70b-instruct"
+set "MODEL_NAME_6=DeepSeek R1 0528          (strong reasoning)"
+set "MODEL_ID_6=deepseek/deepseek-r1-0528"
+set "MODEL_NAME_7=Custom                    (enter any NIM model string manually)"
+set "MODEL_ID_7=CUSTOM"
 
 cls
 echo.
@@ -34,11 +37,6 @@ echo.
 :: ===========================================================================
 :: STEP 1 - Find Python
 :: ===========================================================================
-:: We run --version to confirm execution, not just "where".
-:: The Windows Store creates a fake python stub that passes "where" but
-:: opens the Store instead of running Python.
-:: No goto-inside-parentheses here - that silently crashes CMD.
-
 if "%PYTHON_EXE%"=="" (
     py --version >nul 2>&1
     if !errorlevel! equ 0 set "PYTHON_EXE=py"
@@ -53,15 +51,17 @@ if "%PYTHON_EXE%"=="" (
 )
 if "%PYTHON_EXE%"=="" (
     echo.
-    echo [^!] ERROR: No working Python found.
+    SETLOCAL DisableDelayedExpansion
+    echo [!] ERROR: No working Python found.
+    ENDLOCAL
     echo     Tried: py, python, python3 - all failed.
     echo.
     echo     Fix options:
     echo       1. Install Python from https://python.org
     echo          Tick "Add python.exe to PATH" during install.
     echo       2. Disable the Windows Store alias:
-    echo          Settings ^> Apps ^> Advanced app settings
-    echo          ^> App execution aliases ^> turn OFF python/python3
+    echo          Settings ^> Apps ^> Advanced app settings ^> App execution aliases
+    echo          then turn OFF python / python3.
     echo       3. Set PYTHON_EXE before running this script:
     echo          set PYTHON_EXE=C:\path\to\python.exe
     echo.
@@ -77,7 +77,9 @@ echo [*] Checking dependencies...
 "%PYTHON_EXE%" "%~dp0check_arbiter.py" --install
 if %errorlevel% neq 0 (
     echo.
-    echo [^!] Dependency install failed. See output above.
+    SETLOCAL DisableDelayedExpansion
+    echo [!] Dependency install failed. See output above.
+    ENDLOCAL
     pause
     exit /b 1
 )
@@ -89,12 +91,14 @@ echo.
 if not "%NVIDIA_API_KEY%"=="" goto :key_done
     echo [?] No NVIDIA API key found.
     echo [?] Get one free at: https://build.nvidia.com
-    echo [?]   Sign in, then click your avatar ^> API Key
+    echo [?]   Sign in ^> click your avatar ^> API Key
     echo.
     set /p NVIDIA_API_KEY="    Paste key (nvapi-...): "
     echo.
     if "!NVIDIA_API_KEY!"=="" (
-        echo [^!] No key entered. Exiting.
+        SETLOCAL DisableDelayedExpansion
+        echo [!] No key entered. Exiting.
+        ENDLOCAL
         pause
         exit /b 1
     )
@@ -108,7 +112,6 @@ if not "%NVIDIA_API_KEY%"=="" goto :key_done
     echo.
 :key_done
 echo [*] NVIDIA key : set
-set NVIDIA_NIM_API_KEY=%NVIDIA_API_KEY%
 
 :: ===========================================================================
 :: STEP 4 - Project Folder
@@ -137,8 +140,10 @@ echo [*] Project    : %TARGET_DIR%
 
 if not exist "%TARGET_DIR%" (
     echo.
-    echo [^!] Folder not found: %TARGET_DIR%
-    echo [^!] Check the path or reset it with:  setx TARGET_DIR ""
+    SETLOCAL DisableDelayedExpansion
+    echo [!] Folder not found: %TARGET_DIR%
+    echo [!] Check the path or reset it with:  setx TARGET_DIR ""
+    ENDLOCAL
     pause
     exit /b 1
 )
@@ -146,42 +151,79 @@ if not exist "%TARGET_DIR%" (
 :: ===========================================================================
 :: STEP 5 - Model Selection
 :: ===========================================================================
-:: Only ask once - if NVIDIA_ELITE_MODEL is already saved, skip the menu.
-:: The selected model fills the elite slot only.
-:: K2 0905 is always kept as the speed/fallback tier regardless of choice.
-:: ===========================================================================
 echo.
 if not "%NVIDIA_ELITE_MODEL%"=="" goto :model_done
 
+:: ---------------------------------------------------------------------------
+:: NIM Availability Check
+:: Probes each model with a lightweight POST (max_tokens=1) in parallel.
+:: Uses only Python stdlib — no pip deps required — so it runs before
+:: check_arbiter.py installs anything.
+:: Set SKIP_NIM_CHECK=1 to bypass and show ???? badges instead.
+:: ---------------------------------------------------------------------------
+if "%SKIP_NIM_CHECK%"=="1" goto :skip_nim_check
+
+:: Clean up any stale tmp file from a previous crashed run.
+del "%~dp0nim_status.tmp.bat" >nul 2>&1
+
+echo [*] Checking NIM model availability (8 s timeout, all models in parallel)...
+echo.
+
+"%PYTHON_EXE%" "%~dp0verify_nim_models.py"
+if exist "%~dp0nim_status.tmp.bat" (
+    call "%~dp0nim_status.tmp.bat"
+    del "%~dp0nim_status.tmp.bat" >nul 2>&1
+)
+
+:skip_nim_check
+
+:: Map each raw status to a 4-char display badge via the :set_badge subroutine.
+call :set_badge MODEL_STATUS_1 BADGE_1
+call :set_badge MODEL_STATUS_2 BADGE_2
+call :set_badge MODEL_STATUS_3 BADGE_3
+call :set_badge MODEL_STATUS_4 BADGE_4
+call :set_badge MODEL_STATUS_5 BADGE_5
+call :set_badge MODEL_STATUS_6 BADGE_6
+call :set_badge MODEL_STATUS_7 BADGE_7
+
 echo [?] Select the elite model for this session:
-echo     (K2 0905 is always kept as speed/fallback - this replaces the elite slot only)
+echo     K2 0905 is the default and is always kept as the speed ^/ last-resort model.
+echo     Mistral Large 3 is the automatic fallback when the elite model is unavailable.
 echo.
-echo [^!] NOTE: Not all NIM models work with Claude Code.
-echo [^!] A model can fail for two reasons:
-echo [^!]   1. Not available on your NIM tier/deprecated (returns 404 - Arbiter will fall back to K2 0905)
-echo [^!]   2. Does not support function/tool calling (causes silent failures or broken output)
-echo [^!] Models may go deprecated anytime so please watch https://build.nvidia.com to check for latest models.
-echo     (*) = not confirmed available on all NIM tiers
+SETLOCAL DisableDelayedExpansion
+echo [!] Not all NIM models support the tool-calling required by Claude Code.
+echo [!] FAIL = not available on your NIM tier or deprecated. Arbiter falls back automatically.
+echo [!] Check https://build.nvidia.com for the current model catalogue.
+ENDLOCAL
 echo.
-echo     1. %MODEL_NAME_1%
-echo     2. %MODEL_NAME_2%
-echo     3. %MODEL_NAME_3%
-echo     4. %MODEL_NAME_4%
-echo     5. %MODEL_NAME_5%
-echo     6. %MODEL_NAME_6%
+echo     Status   [OK  ] Live and responding on your key
+echo              [FAIL] Not available on NIM (4xx / deprecated)
+echo              [TIME] Timed out (NIM overloaded or network issue)
+echo              [????] Skipped (no API key yet, or SKIP_NIM_CHECK=1)
+echo              [SKIP] Not applicable (Custom slot)
 echo.
-choice /C 123456 /N /M "    Choice [1-6, default=1]: "
-set "SEL=!errorlevel!"
+echo     1. [%BADGE_1%] %MODEL_NAME_1%
+echo     2. [%BADGE_2%] %MODEL_NAME_2%
+echo     3. [%BADGE_3%] %MODEL_NAME_3%
+echo     4. [%BADGE_4%] %MODEL_NAME_4%
+echo     5. [%BADGE_5%] %MODEL_NAME_5%
+echo     6. [%BADGE_6%] %MODEL_NAME_6%
+echo     7. [%BADGE_7%] %MODEL_NAME_7%
+echo     E. Edit model list (opens this file in Notepad, then restart)
+echo.
+choice /C 1234567E /N /M "    Choice [1-7 / E, default=1]: "
+set "SEL=%errorlevel%"
 
-:: Map choice number to model ID
-if "!SEL!"=="6" set "NVIDIA_ELITE_MODEL=!MODEL_ID_6!"
-if "!SEL!"=="5" set "NVIDIA_ELITE_MODEL=!MODEL_ID_5!"
-if "!SEL!"=="4" set "NVIDIA_ELITE_MODEL=!MODEL_ID_4!"
-if "!SEL!"=="3" set "NVIDIA_ELITE_MODEL=!MODEL_ID_3!"
-if "!SEL!"=="2" set "NVIDIA_ELITE_MODEL=!MODEL_ID_2!"
-if "!SEL!"=="1" set "NVIDIA_ELITE_MODEL=!MODEL_ID_1!"
+:: choice /C returns errorlevel position: 1=1, 2=2 ... 7=7, 8=E
+if "%SEL%"=="8" goto :edit_model_list
+if "%SEL%"=="7" set "NVIDIA_ELITE_MODEL=%MODEL_ID_7%"
+if "%SEL%"=="6" set "NVIDIA_ELITE_MODEL=%MODEL_ID_6%"
+if "%SEL%"=="5" set "NVIDIA_ELITE_MODEL=%MODEL_ID_5%"
+if "%SEL%"=="4" set "NVIDIA_ELITE_MODEL=%MODEL_ID_4%"
+if "%SEL%"=="3" set "NVIDIA_ELITE_MODEL=%MODEL_ID_3%"
+if "%SEL%"=="2" set "NVIDIA_ELITE_MODEL=%MODEL_ID_2%"
+if "%SEL%"=="1" set "NVIDIA_ELITE_MODEL=%MODEL_ID_1%"
 
-:: Custom path -- ask for manual model string
 if "!NVIDIA_ELITE_MODEL!"=="CUSTOM" (
     echo.
     echo [?] Enter the NIM model string.
@@ -191,18 +233,18 @@ if "!NVIDIA_ELITE_MODEL!"=="CUSTOM" (
     echo.
     set /p NVIDIA_ELITE_MODEL="    Model: "
     if "!NVIDIA_ELITE_MODEL!"=="" (
-        echo [^!] No model entered. Using default Kimi K2.5.
-        set "NVIDIA_ELITE_MODEL=!MODEL_ID_1!"
+        SETLOCAL DisableDelayedExpansion
+        echo [!] No model entered. Using default Kimi K2 0905.
+        ENDLOCAL
+        set "NVIDIA_ELITE_MODEL=%MODEL_ID_1%"
     )
-    :: Strip build.nvidia.com URL prefix if user pasted the browser URL.
-    :: CMD string substitution: replaces the prefix with nothing, leaving only the model path.
     set "NVIDIA_ELITE_MODEL=!NVIDIA_ELITE_MODEL:https://build.nvidia.com/=!"
     set "NVIDIA_ELITE_MODEL=!NVIDIA_ELITE_MODEL:http://build.nvidia.com/=!"
     echo [*] Using model ID: !NVIDIA_ELITE_MODEL!
 )
 
 echo.
-echo [*] Elite model : !NVIDIA_ELITE_MODEL!
+echo [*] Elite model : %NVIDIA_ELITE_MODEL%
 echo.
 choice /C YN /M "Save this as your default model (skip menu next time)"
 if !errorlevel! equ 1 (
@@ -210,6 +252,22 @@ if !errorlevel! equ 1 (
     echo [+] Saved.
 )
 echo.
+goto :model_done
+
+:: ---------------------------------------------------------------------------
+:edit_model_list
+:: ---------------------------------------------------------------------------
+echo.
+echo [*] Opening start_arbiter.bat in Notepad...
+echo [*] Edit the MODEL ROSTER block at the very top of the file.
+echo [*] Increment MODEL_COUNT when adding entries, decrement when removing.
+echo [*] Save and close Notepad, then re-run start_arbiter.bat to apply.
+echo.
+start "" notepad "%~f0"
+echo [*] Notepad launched. Arbiter setup will now exit - re-run after saving.
+echo.
+pause
+exit /b 0
 
 :model_done
 echo [*] Elite model : %NVIDIA_ELITE_MODEL%
@@ -217,16 +275,25 @@ echo [*] Elite model : %NVIDIA_ELITE_MODEL%
 :: ===========================================================================
 :: STEP 6 - Launch
 :: ===========================================================================
-set ANTHROPIC_AUTH_TOKEN=
+
+:: Arbiter intercepts all Anthropic API calls for this session.
+:: ANTHROPIC_BASE_URL redirects Claude Code to the local bridge.
+:: ANTHROPIC_API_KEY must be non-empty or Claude Code refuses to start -
+::   the bridge never forwards this value to NVIDIA; "sk-test-123" is intentionally fake.
+:: ANTHROPIC_AUTH_TOKEN is cleared so Claude Code uses ANTHROPIC_API_KEY instead.
+if not "%ANTHROPIC_AUTH_TOKEN%"=="" (
+    echo [*] Clearing ANTHROPIC_AUTH_TOKEN for this session ^(Arbiter handles auth^)
+    set ANTHROPIC_AUTH_TOKEN=
+)
 set ANTHROPIC_BASE_URL=http://127.0.0.1:4005
-:: Claude Code requires ANTHROPIC_API_KEY to be set or it refuses to start.
-:: The bridge never forwards this value to NVIDIA - your real key is NVIDIA_API_KEY.
-:: Any non-empty string works here; "sk-test-123" is intentionally fake.
 set ANTHROPIC_API_KEY=sk-test-123
 set PYTHONIOENCODING=utf-8
 
+:: Kill any stale process already on port 4005.
+:: Uses exact port match " :4005 " (with surrounding spaces) to avoid
+:: accidentally matching ports like :40050 or :140005.
 echo [*] Cleaning up port 4005...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :4005') do (
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr "LISTENING" ^| findstr " :4005 "') do (
     taskkill /f /pid %%a >nul 2>&1
 )
 
@@ -235,77 +302,135 @@ if "%PYTHONPATH%"=="" (
 ) else (
     set "PYTHONPATH=%PYTHONPATH%;%~dp0"
 )
+
 echo [*] Starting Arbiter on 127.0.0.1:4005...
 start "ARBITER BRIDGE" "%PYTHON_EXE%" "%~dp0arbiter_bridge.py"
+
+:: --wait polls http://127.0.0.1:4005/ every 0.5s until the bridge responds
+:: (up to 15 seconds). Exits 1 if the bridge never comes up.
 "%PYTHON_EXE%" "%~dp0check_arbiter.py" --wait
 if %errorlevel% neq 0 (
     echo.
-    echo [^!] Bridge failed to start. See the log excerpt above.
-    echo [^!] Full log: %~dp0arbiter_runtime.log
+    SETLOCAL DisableDelayedExpansion
+    echo [!] Bridge failed to start. See the log excerpt above.
+    echo [!] Full log: %~dp0arbiter_runtime.log
+    ENDLOCAL
     pause
     exit /b 1
 )
 
-:: -- Check Claude Code is installed ----------------------------------------
+:: -- Check Claude Code is installed -----------------------------------------
 where claude >nul 2>&1
-if %errorlevel% neq 0 (
-    echo.
-    echo [^!] Claude Code is not installed on this machine.
-    echo [^!] Arbiter needs Claude Code to work.
-    echo.
-    echo     Claude Code is installed via npm ^(Node.js package manager^).
-    echo.
-    where npm >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo [+] npm is available. Offering automatic install...
-        echo.
-        choice /C YN /M "    Install Claude Code now? ^(npm install -g @anthropic-ai/claude-code^)"
-        if !errorlevel! equ 1 (
-            echo.
-            echo [*] Installing Claude Code - this may take a minute...
-            npm install -g @anthropic-ai/claude-code
-            if !errorlevel! equ 0 (
-                echo.
-                echo [+] Claude Code installed successfully.
-                echo [+] Launching now...
-                echo.
-            ) else (
-                echo.
-                echo [^!] npm install failed. Try running this script as Administrator,
-                echo [^!] or install manually and re-run Arbiter.
-                pause
-                exit /b 1
-            )
-        ) else (
-            echo.
-            echo     To install manually:
-            echo       npm install -g @anthropic-ai/claude-code
-            echo     Then re-run start_arbiter.bat.
-            pause
-            exit /b 1
-        )
-    ) else (
-        echo [^!] npm is not installed either. You need Node.js first.
-        echo.
-        echo     Step 1: Download and install Node.js from https://nodejs.org
-        echo             Choose the LTS version. Tick "Add to PATH" during install.
-        echo.
-        echo     Step 2: Open a NEW terminal window ^(important - PATH wont update
-        echo             until you open a fresh one^).
-        echo.
-        echo     Step 3: Run:  npm install -g @anthropic-ai/claude-code
-        echo.
-        echo     Step 4: Re-run start_arbiter.bat
-        echo.
-        pause
-        exit /b 1
-    )
-)
+if %errorlevel% equ 0 goto :claude_found
 
+echo.
+echo [^^!] Claude Code is not installed on this machine.
+echo [^^!] Arbiter needs Claude Code to work.
+echo.
+echo     Claude Code is installed via npm (Node.js package manager).
+echo.
+where npm >nul 2>&1
+if %errorlevel% neq 0 goto :no_npm
+
+echo [+] npm is available. Offering automatic install...
+echo.
+choice /C YN /M "    Install Claude Code now? (npm install -g @anthropic-ai/claude-code)"
+if %errorlevel% neq 1 goto :manual_install
+
+echo.
+echo [*] Installing Claude Code - this may take a minute...
+npm install -g @anthropic-ai/claude-code
+if %errorlevel% equ 0 (
+    echo.
+    echo [+] Claude Code installed successfully.
+    echo [+] Launching now...
+    echo.
+    goto :claude_found
+)
+echo.
+echo [^^!] npm install failed. Try running this script as Administrator,
+echo [^^!] or install manually: npm install -g @anthropic-ai/claude-code
+pause
+exit /b 1
+
+:manual_install
+echo.
+echo     To install manually:
+echo       npm install -g @anthropic-ai/claude-code
+echo     Then re-run start_arbiter.bat.
+pause
+exit /b 1
+
+:no_npm
+echo [^^!] npm is not installed either. You need Node.js first.
+echo.
+echo     Step 1: Download and install Node.js from https://nodejs.org
+echo             Choose the LTS version. Tick "Add to PATH" during install.
+echo.
+echo     Step 2: Open a NEW terminal window (PATH won't update until you do).
+echo.
+echo     Step 3: Run:  npm install -g @anthropic-ai/claude-code
+echo.
+echo     Step 4: Re-run start_arbiter.bat
+echo.
+pause
+exit /b 1
+
+:claude_found
 echo.
 echo ======================================================
 echo  Arbiter running. Launching Claude Code...
 echo ======================================================
 echo.
 cd /d "%TARGET_DIR%"
-claude
+
+:: Run claude in an isolated cmd so a crash cannot kill this window.
+:: Stderr is captured to claude_stderr.log for crash diagnosis.
+set "STDERR_LOG=%~dp0claude_stderr.log"
+cmd /c claude 2>"%STDERR_LOG%"
+set CC_EXIT=%errorlevel%
+
+echo.
+echo ======================================================
+if %CC_EXIT% equ 0 (
+    echo  Claude Code exited normally.
+) else (
+    echo  Claude Code exited with error code: %CC_EXIT%
+    echo.
+    echo  --- stderr output: ---
+    if exist "%STDERR_LOG%" (
+        type "%STDERR_LOG%"
+    ) else (
+        echo  [no stderr captured]
+    )
+    echo  ----------------------
+    echo.
+    echo  Also check:
+    echo    - Arbiter Bridge window for [REQ] request logs
+    echo    - %~dp0arbiter_runtime.log
+)
+echo ======================================================
+echo.
+pause
+goto :eof
+
+
+:: ===========================================================================
+:: SUBROUTINE: set_badge
+:: Usage:  call :set_badge  STATUS_VAR_NAME  BADGE_VAR_NAME
+:: Reads MODEL_STATUS_N (via indirect delayed expansion) and maps it to a
+:: fixed-width 4-char display badge stored in BADGE_N.
+:: ===========================================================================
+:set_badge
+set "_raw=!%~1!"
+set "%~2=????"
+if "!_raw!"=="OK"      set "%~2=OK  "
+if "!_raw!"=="NOKEY"   set "%~2=????"
+if "!_raw!"=="SKIP"    set "%~2=SKIP"
+if "!_raw!"=="TIMEOUT" set "%~2=TIME"
+:: Match FAIL:NNN — guard against empty _raw to avoid spurious "ECHO is off." output.
+if not "!_raw!"=="" (
+    echo !_raw! | findstr /b "FAIL" >nul 2>&1
+    if !errorlevel! equ 0 set "%~2=FAIL"
+)
+goto :eof

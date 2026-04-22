@@ -8,7 +8,9 @@ REQUIRED = [
     ("fastapi",   "fastapi"),
     ("uvicorn",   "uvicorn[standard]"),
     ("openai",    "openai"),
-    ("requests",  "requests"),   # used by --test flag
+    ("requests",  "requests"),
+    ("httpx",     "httpx[http2]"),
+    ("orjson",    "orjson"),
 ]
 
 def check_module(import_name):
@@ -29,6 +31,36 @@ def install_package(pip_name):
         return False
     return True
 
+
+# ── --wait: poll until the bridge is alive, then exit 0 ──────────────────────
+# Called by start_arbiter.bat after launching the bridge process.
+# Polls /  on 127.0.0.1:4005 every 0.5s for up to 15 seconds.
+# Exits 0 when the bridge responds, exits 1 if it never comes up.
+if "--wait" in sys.argv:
+    import time
+    import urllib.request
+    import urllib.error
+
+    port = int(os.environ.get("BRIDGE_PORT", "4005"))
+    url  = f"http://127.0.0.1:{port}/"
+    print(f"[*] Waiting for Arbiter bridge on port {port}...")
+
+    for attempt in range(30):   # 30 × 0.5s = 15 seconds max
+        try:
+            with urllib.request.urlopen(url, timeout=1) as resp:
+                if resp.status == 200:
+                    print("[+] Bridge is ready.")
+                    sys.exit(0)
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(0.5)
+
+    print("[!] Bridge did not respond within 15 seconds.")
+    print("[!] Check arbiter_runtime.log for errors.")
+    sys.exit(1)
+
+
+# ── Normal audit / install mode ───────────────────────────────────────────────
 print("\n=== ARBITER: SYSTEM AUDIT ===")
 print(f"Python : {sys.version.split()[0]}  ({sys.executable})")
 print(f"API Key: {'SET' if os.environ.get('NVIDIA_API_KEY') else 'NOT SET'}")
@@ -50,7 +82,6 @@ if missing and auto_install:
     failed = []
     for import_name, pip_name in missing:
         if install_package(pip_name):
-            # Verify it actually works after install
             if check_module(import_name):
                 print(f"  [+] {import_name} installed OK")
             else:
@@ -72,7 +103,7 @@ elif missing:
 print()
 print("[+] All dependencies present.")
 
-# Optional functional test
+# ── Optional functional test ──────────────────────────────────────────────────
 if "--test" in sys.argv:
     print("\n=== FUNCTIONAL BRIDGE TEST ===")
     import requests, json
